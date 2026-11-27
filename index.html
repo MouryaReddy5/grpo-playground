@@ -20,7 +20,7 @@
   .group .bar::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid var(--line); }
   .group .bar span { position: absolute; top: 2px; height: 10px; border-radius: 2px; }
   .ok { color: var(--c3); } .bad { color: var(--c2); }
-  .heat { display: grid; grid-template-columns: 18px repeat(10, 1fr); gap: 2px; font: 10px var(--mono); color: var(--muted); text-align: center; }
+  .heat { max-width: 340px; display: grid; grid-template-columns: 18px repeat(10, 1fr); gap: 2px; font: 10px var(--mono); color: var(--muted); text-align: center; }
   .heat div.c { aspect-ratio: 1; border-radius: 2px; }
   h3 { margin: 0 0 8px; font-size: 18px; }
 </style>
@@ -64,6 +64,7 @@
       <div class="stat" id="gq" style="margin-bottom:8px"></div>
       <div class="group" id="group"></div>
       <h3 style="margin-top:20px">GRPO policy: P(correct) for a + b</h3>
+      <div class="stat" style="margin-bottom:8px">rows = a · columns = b · darker = more likely to answer correctly</div>
       <div class="heat" id="heat"></div>
     </div>
   </div>
@@ -140,6 +141,8 @@ function doStep() {
   if (step % 5 === 0 || !playing) learners.forEach(evaluate);
 }
 
+function std0(r) { return r.every(x => x === r[0]); }
+
 function render() {
   $("step").textContent = step;
   // curve
@@ -162,7 +165,7 @@ function render() {
     $("group").innerHTML = `<div class="row stat"><span>ans</span><span>r</span><span>advantage</span></div>` + samples.map((s, i) => {
       const A = adv[i], wd = Math.abs(A) / maxA * 50;
       return `<div class="row"><span class="${s.join("") === t.join("") ? "ok" : "bad"}">${s.join("")}</span><span>${rw[i].toFixed(1)}</span><span class="bar"><span style="left:${A >= 0 ? 50 : 50 - wd}%;width:${wd}%;background:var(${A >= 0 ? "--c3" : "--c2"})"></span></span></div>`;
-    }).join("");
+    }).join("") + (std0(rw) ? `<div class="stat" style="margin-top:8px">every answer scored the same, so the advantages are all 0 and this group teaches nothing</div>` : "");
   } else { $("gq").textContent = "press train or 1 step"; $("group").innerHTML = ""; }
 
   // heatmap
@@ -171,7 +174,7 @@ function render() {
     html += `<div>${a}</div>`;
     for (let b = 0; b < 10; b++) {
       const q = a * 10 + b, t = target(q), p = softmax(L.theta[q][0])[t[0]] * softmax(L.theta[q][1])[t[1]];
-      html += `<div class="c" title="${a}+${b}: ${(p * 100).toFixed(0)}%" style="background:color-mix(in srgb, var(--c1) ${Math.round(p * 100)}%, var(--bg))"></div>`;
+      html += `<div class="c" title="${a}+${b}: ${(p * 100).toFixed(0)}%" style="background:color-mix(in srgb, var(--c1) ${Math.round(Math.sqrt(p) * 100)}%, var(--bg))"></div>`;
     }
   }
   $("heat").innerHTML = html;

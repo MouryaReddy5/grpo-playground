@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRPO Playground</title>
+<meta name="description" content="Train a tiny policy to do arithmetic with Group Relative Policy Optimization and compare it to REINFORCE, live in the browser.">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/theme.js"></script>
+<style>
+  h1 { font-size: 36px; margin: 8px 0 6px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; margin-top: 16px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  #curve { width: 100%; height: 260px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font: 12px var(--mono); }
+  .legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  .group { font: 13px var(--mono); }
+  .group .row { display: grid; grid-template-columns: 34px 42px 1fr; gap: 8px; align-items: center; margin: 3px 0; }
+  .group .bar { position: relative; height: 14px; }
+  .group .bar::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid var(--line); }
+  .group .bar span { position: absolute; top: 2px; height: 10px; border-radius: 2px; }
+  .ok { color: var(--c3); } .bad { color: var(--c2); }
+  .heat { display: grid; grid-template-columns: 18px repeat(10, 1fr); gap: 2px; font: 10px var(--mono); color: var(--muted); text-align: center; }
+  .heat div.c { aspect-ratio: 1; border-radius: 2px; }
+  h3 { margin: 0 0 8px; font-size: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap wide">
+  <div class="topbar">
+    <a class="back" href="https://mouryareddy5.github.io/">← Mourya Reddy</a>
+    <button class="theme-btn" type="button">dark</button>
+  </div>
+  <span class="eyebrow">app · reinforcement learning</span>
+  <h1>GRPO Playground</h1>
+  <p class="lede">A policy starts out guessing answers to “a + b = ?” at random. For each question it samples a <em>group</em> of answers, scores them, and pushes up the ones that beat their group's average. That is GRPO, the method DeepSeek used to train reasoning without a value network. Three learners train side by side on identical data.</p>
+
+  <div class="panel" style="margin-top:20px">
+    <div class="controls" style="margin:0">
+      <label>reward
+        <span class="seg" id="reward"><button data-v="exact" class="on">exact only</button><button data-v="partial">partial (per digit)</button><button data-v="shift">shifted (+1 always)</button></span>
+      </label>
+      <label>group size G <input type="range" id="G" min="2" max="16" step="1" value="8"> <b id="Gv" class="mono">8</b></label>
+      <label>KL β <input type="range" id="beta" min="0" max="0.2" step="0.01" value="0.02"> <b id="bv" class="mono">0.02</b></label>
+      <label>lr <input type="range" id="lr" min="0.05" max="2" step="0.05" value="0.1"> <b id="lv" class="mono">0.10</b></label>
+    </div>
+    <div class="controls" style="margin-bottom:0">
+      <button class="btn" id="play">train</button>
+      <button class="btn ghost" id="one">1 step</button>
+      <button class="btn ghost" id="reset">reset</button>
+      <span class="stat">step <b id="step">0</b> / 1500</span>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <h3>Greedy accuracy on all 100 questions</h3>
+      <canvas id="curve"></canvas>
+      <div class="legend" id="legend"></div>
+      <p class="note">GRPO advantage: Aᵢ = (rᵢ − mean(r)) / std(r) within each group. REINFORCE uses the raw reward as the advantage, so every sampled answer with positive reward gets pushed up, right or not. The mean-baseline variant subtracts the group mean but skips the std normalization (as in Dr. GRPO).</p>
+    </div>
+    <div class="panel">
+      <h3>Latest GRPO group</h3>
+      <div class="stat" id="gq" style="margin-bottom:8px"></div>
+      <div class="group" id="group"></div>
+      <h3 style="margin-top:20px">GRPO policy: P(correct) for a + b</h3>
+      <div class="heat" id="heat"></div>
+    </div>
+  </div>
+
+  <p class="note" style="margin-top:24px">Setup: the policy is a table of logits, one 10-way softmax for the tens digit and one for the ones digit per question. Each step draws 8 questions, samples G answers each, and takes 2 clipped-ratio updates (ε = 0.2) with a k3 KL penalty to the starting policy, exactly the GRPO objective, minus the neural network. Things to try: “shifted” adds +1 to every reward, which changes nothing about which answer is better. GRPO and the mean baseline don't care, but REINFORCE now pushes up every sampled answer and slows down a lot. With “exact only” and G = 2, most groups are all-wrong and give no signal at all, which is why group size matters for sparse rewards.</p>
+  <footer class="site">GRPO Playground · by <a href="https://mouryareddy5.github.io/">Mourya Reddy</a> · <a href="https://github.com/MouryaReddy5/grpo-playground">source</a></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ALGOS = [
+  { id: "grpo", name: "GRPO", color: "--c1" },
+  { id: "mean", name: "mean baseline", color: "--c3" },
+  { id: "reinforce", name: "REINFORCE", color: "--c2" }
+];
+const MAX = 1500, BATCH = 8, EPS = 0.2, INNER = 2;
+
+function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function softmax(z) { const m = Math.max(...z), e = z.map(x => Math.exp(x - m)), s = e.reduce((a, b) => a + b); return e.map(x => x / s); }
+function sample(p, r) { let u = r(), k = 0; while (k < 9 && (u -= p[k]) > 0) k++; return k; }
+const target = q => { const s = Math.floor(q / 10) + q % 10; return [Math.floor(s / 10), s % 10]; };
+
+function makeLearner(a) {
+  const init = rng(7);
+  const theta = Array.from({ length: 100 }, () => [0, 1].map(() => Array.from({ length: 10 }, () => (init() - .5) * 0.2)));
+  return { a, theta, ref: theta.map(q => q.map(z => softmax(z))), acc: [], r: rng(42) };
+}
+
+let learners, step, playing = false, lastGroup = null;
+function reset() { learners = ALGOS.map(makeLearner); step = 0; lastGroup = null; learners.forEach(evaluate); render(); }
+
+function reward(q, ans) {
+  const t = target(q), hits = (ans[0] === t[0]) + (ans[1] === t[1]);
+  if (state.reward === "shift") return 1 + hits / 2;
+  return state.reward === "exact" ? (hits === 2 ? 1 : 0) : hits / 2;
+}
+
+function trainStep(L, qs, G, beta, lr) {
+  for (const q of qs) {
+    const old = L.theta[q].map(z => softmax(z));
+    const samples = Array.from({ length: G }, () => [sample(old[0], L.r), sample(old[1], L.r)]);
+    const rw = samples.map(s => reward(q, s));
+    const mean = rw.reduce((a, b) => a + b) / G, std = Math.sqrt(rw.reduce((a, b) => a + (b - mean) ** 2, 0) / G);
+    const adv = rw.map(r => L.a.id === "grpo" ? (std > 1e-6 ? (r - mean) / std : 0) : L.a.id === "mean" ? r - mean : r);
+    if (L.a.id === "grpo") lastGroup = { q, samples, rw, adv };
+    for (let it = 0; it < INNER; it++) {
+      for (let pos = 0; pos < 2; pos++) {
+        const pi = softmax(L.theta[q][pos]), g = new Array(10).fill(0);
+        samples.forEach((s, i) => {
+          const a = s[pos], ratio = pi[a] / old[pos][a], A = adv[i];
+          const clipped = (A > 0 && ratio > 1 + EPS) || (A < 0 && ratio < 1 - EPS);
+          const kr = L.ref[q][pos][a] / pi[a];
+          const coef = (clipped ? 0 : ratio * A) - beta * (1 - kr);
+          for (let k = 0; k < 10; k++) g[k] += coef * ((k === a) - pi[k]) / G;
+        });
+        for (let k = 0; k < 10; k++) L.theta[q][pos][k] += lr * g[k];
+      }
+    }
+  }
+}
+
+function evaluate(L) {
+  let c = 0;
+  for (let q = 0; q < 100; q++) { const t = target(q), z = L.theta[q]; if (z[0].indexOf(Math.max(...z[0])) === t[0] && z[1].indexOf(Math.max(...z[1])) === t[1]) c++; }
+  L.acc.push([step, c]);
+}
+
+function doStep() {
+  if (step >= MAX) { playing = false; $("play").textContent = "train"; return; }
+  const G = +$("G").value, beta = +$("beta").value, lr = +$("lr").value, pick = rng(1000 + step);
+  const qs = Array.from({ length: BATCH }, () => Math.floor(pick() * 100));
+  learners.forEach(L => trainStep(L, qs, G, beta, lr));
+  step++;
+  if (step % 5 === 0 || !playing) learners.forEach(evaluate);
+}
+
+function render() {
+  $("step").textContent = step;
+  // curve
+  const cv = $("curve"), dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr; const g = cv.getContext("2d"); g.scale(dpr, dpr);
+  const px = s => 30 + s / MAX * (w - 36), py = v => h - 18 - v / 100 * (h - 28);
+  g.font = "10px " + cssVar("--mono"); g.fillStyle = cssVar("--muted"); g.strokeStyle = cssVar("--line"); g.lineWidth = 1;
+  [0, 25, 50, 75, 100].forEach(v => { g.beginPath(); g.moveTo(30, py(v)); g.lineTo(w, py(v)); g.stroke(); g.fillText(v + "%", 0, py(v) + 3); });
+  [0, 500, 1000, 1500].forEach(s => g.fillText(s, Math.min(px(s) - 6, w - 24), h - 4));
+  learners.forEach(L => {
+    g.strokeStyle = cssVar(L.a.color); g.lineWidth = 2; g.beginPath();
+    L.acc.forEach(([s, v], i) => i ? g.lineTo(px(s), py(v)) : g.moveTo(px(s), py(v))); g.stroke();
+  });
+  $("legend").innerHTML = learners.map(L => `<span><i style="background:var(${L.a.color})"></i>${L.a.name} <b>${L.acc[L.acc.length - 1][1]}%</b></span>`).join("");
+
+  // group
+  if (lastGroup) {
+    const { q, samples, rw, adv } = lastGroup, t = target(q), maxA = Math.max(1, ...adv.map(Math.abs));
+    $("gq").innerHTML = `question <b>${Math.floor(q / 10)} + ${q % 10} = ?</b> · answer ${t.join("")} · mean reward ${(rw.reduce((a, b) => a + b) / rw.length).toFixed(2)}`;
+    $("group").innerHTML = `<div class="row stat"><span>ans</span><span>r</span><span>advantage</span></div>` + samples.map((s, i) => {
+      const A = adv[i], wd = Math.abs(A) / maxA * 50;
+      return `<div class="row"><span class="${s.join("") === t.join("") ? "ok" : "bad"}">${s.join("")}</span><span>${rw[i].toFixed(1)}</span><span class="bar"><span style="left:${A >= 0 ? 50 : 50 - wd}%;width:${wd}%;background:var(${A >= 0 ? "--c3" : "--c2"})"></span></span></div>`;
+    }).join("");
+  } else { $("gq").textContent = "press train or 1 step"; $("group").innerHTML = ""; }
+
+  // heatmap
+  const L = learners[0]; let html = "<div></div>" + [...Array(10).keys()].map(b => `<div>${b}</div>`).join("");
+  for (let a = 0; a < 10; a++) {
+    html += `<div>${a}</div>`;
+    for (let b = 0; b < 10; b++) {
+      const q = a * 10 + b, t = target(q), p = softmax(L.theta[q][0])[t[0]] * softmax(L.theta[q][1])[t[1]];
+      html += `<div class="c" title="${a}+${b}: ${(p * 100).toFixed(0)}%" style="background:color-mix(in srgb, var(--c1) ${Math.round(p * 100)}%, var(--bg))"></div>`;
+    }
+  }
+  $("heat").innerHTML = html;
+}
+
+const state = { reward: "exact" };
+document.querySelectorAll("#reward button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#reward button").forEach(x => x.classList.toggle("on", x === b)); state.reward = b.dataset.v; reset();
+});
+[["G", "Gv", 0], ["beta", "bv", 2], ["lr", "lv", 2]].forEach(([id, out, d]) => $(id).addEventListener("input", () => $(out).textContent = (+$(id).value).toFixed(d)));
+$("play").onclick = () => { playing = !playing; $("play").textContent = playing ? "pause" : "train"; };
+$("one").onclick = () => { playing = false; $("play").textContent = "train"; doStep(); render(); };
+$("reset").onclick = () => { playing = false; $("play").textContent = "train"; reset(); };
+window.addEventListener("resize", render);
+window.addEventListener("themechange", render);
+(function loop() { if (playing) { for (let i = 0; i < 3; i++) doStep(); render(); } requestAnimationFrame(loop); })();
+reset();
+</script>
+</body>
+</html>
